@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "LMS Deadline Sync",
+  "version": "1.0",
+  "description": "Sync LMS deadlines",
+  "action": {
+    "default_popup": "index.html"
+  },
+  "permissions": ["storage", "activeTab"]
+}
