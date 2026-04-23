@@ -1,5 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import "./popup.css";
+
+const BACKEND = "http://localhost:8000";
 
 const CalendarIcon = () => (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -20,21 +22,119 @@ const GoogleIcon = () => (
   </svg>
 );
 
-const deadlines = [
-  { id: 1, name: "Essay draft", course: "ENGL 201", date: "Mar 18", days: "3 days", color: "#1a73e8" },
-  { id: 2, name: "Problem set 4", course: "MATH 110", date: "Mar 20", days: "5 days", color: "#ea4335" },
-  { id: 3, name: "Lab report", course: "CHEM 120", date: "Mar 22", days: "7 days", color: "#f9ab00" },
-];
+// Colors to cycle through for deadline items
+const COLORS = ["#1a73e8", "#ea4335", "#f9ab00", "#34a853", "#9c27b0", "#ff5722"];
+
+function formatDueDate(isoString) {
+  const date = new Date(isoString);
+  const now = new Date();
+  const diffMs = date - now;
+  const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+
+  const dateStr = date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+
+  let urgency;
+  if (diffDays < 0) urgency = "overdue";
+  else if (diffDays === 0) urgency = "today";
+  else if (diffDays === 1) urgency = "tomorrow";
+  else urgency = `${diffDays} days`;
+
+  return { dateStr, urgency, isUrgent: diffDays <= 2 };
+}
 
 export default function Popup() {
   const [isOn, setIsOn] = useState(false);
-  const [isConnected, setIsConnected] = useState(false);
+  const [connectedEmail, setConnectedEmail] = useState(null);
+  const [checkingStatus, setCheckingStatus] = useState(true);
+  const [deadlines, setDeadlines] = useState([]);
+  const [loadingDeadlines, setLoadingDeadlines] = useState(false);
 
-  const isActive = isOn && isConnected;
+  const isActive = isOn && !!connectedEmail;
 
-  const handleToggle = () => setIsOn((prev) => !prev);
+  // Fetch real deadlines from backend — only upcoming ones, max 5
+  const fetchDeadlines = () => {
+    setLoadingDeadlines(true);
+    fetch(`${BACKEND}/api/deadlines`)
+      .then((res) => res.json())
+      .then((data) => {
+        const now = new Date();
+        const upcoming = data
+          .filter((d) => new Date(d.due_date) >= now)  // only future
+          .slice(0, 5);                                  // max 5
+        setDeadlines(upcoming);
+      })
+      .catch(() => setDeadlines([]))
+      .finally(() => setLoadingDeadlines(false));
+  };
 
-  const handleGoogle = () => setIsConnected(true);
+  // On mount: restore toggle + check Google status + fetch deadlines
+  useEffect(() => {
+    chrome.storage.local.get("syncEnabled", (result) => {
+      if (result.syncEnabled) setIsOn(true);
+    });
+
+    fetch(`${BACKEND}/auth/google/status`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.connected) setConnectedEmail(data.email);
+      })
+      .catch(() => {})
+      .finally(() => setCheckingStatus(false));
+
+    fetchDeadlines();
+  }, []);
+
+  const handleToggle = () => {
+    if (!connectedEmail && !isOn) {
+      alert("Please connect your Google account first.");
+      return;
+    }
+
+    const newState = !isOn;
+    setIsOn(newState);
+    chrome.storage.local.set({ syncEnabled: newState });
+
+    if (newState) {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        if (tabs[0]?.id) {
+          chrome.tabs.sendMessage(tabs[0].id, { type: "SYNC_TOGGLED_ON" })
+            .catch(() => {});
+        }
+      });
+
+      // Refresh deadlines after a short delay to show newly synced ones
+      setTimeout(fetchDeadlines, 3000);
+    }
+  };
+
+  const handleGoogle = () => {
+    const authWindow = window.open(
+      `${BACKEND}/auth/google/login`,
+      "_blank",
+      "width=500,height=600"
+    );
+
+    const poll = setInterval(() => {
+      fetch(`${BACKEND}/auth/google/status`)
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.connected) {
+            setConnectedEmail(data.email);
+            clearInterval(poll);
+            authWindow?.close();
+          }
+        })
+        .catch(() => clearInterval(poll));
+    }, 1000);
+
+    setTimeout(() => clearInterval(poll), 120000);
+  };
+
+  const handleDisconnect = () => {
+    setConnectedEmail(null);
+    setIsOn(false);
+    chrome.storage.local.set({ syncEnabled: false });
+  };
 
   return (
     <div className="shell">
@@ -43,9 +143,7 @@ export default function Popup() {
         {/* Top bar */}
         <div className="topbar">
           <div className="brand">
-            <div className="brand-icon">
-              <CalendarIcon />
-            </div>
+            <div className="brand-icon"><CalendarIcon /></div>
             <span className="brand-name">LMS Deadline Sync</span>
           </div>
           <div className={`badge ${!isActive ? "off" : ""}`}>
@@ -69,42 +167,80 @@ export default function Popup() {
           </div>
         </div>
 
-        {/* Sign in */}
+        {/* Google Sign in */}
         <div className="section">
-          <div className="row-label">Sign in</div>
-          <button
-            className="btn btn-google"
-            onClick={handleGoogle}
-            style={isConnected ? { borderColor: "#34a853", color: "#34a853" } : {}}
-          >
-            <GoogleIcon />
-            <span>{isConnected ? "student@university.edu" : "Continue with Google"}</span>
-          </button>
-          <div className="divider-text"><span>or</span></div>
-          <button className="btn btn-ghost">Create a new account</button>
+          <div className="row-label">Google Account</div>
+
+          {checkingStatus ? (
+            <button className="btn btn-google" disabled>
+              <GoogleIcon />
+              <span>Checking status...</span>
+            </button>
+          ) : connectedEmail ? (
+            <>
+              <button className="btn btn-google" style={{ color: "#34a853" }}>
+                <GoogleIcon />
+                <span>✓ {connectedEmail}</span>
+              </button>
+              <div className="divider-text"><span>or</span></div>
+              <button className="btn btn-ghost" onClick={handleDisconnect}>
+                Disconnect account
+              </button>
+            </>
+          ) : (
+            <>
+              <button className="btn btn-google" onClick={handleGoogle}>
+                <GoogleIcon />
+                <span>Continue with Google</span>
+              </button>
+              <div className="divider-text"><span>or</span></div>
+              <button className="btn btn-ghost">Create a new account</button>
+            </>
+          )}
         </div>
 
-        {/* Deadlines */}
+        {/* Deadlines — now dynamic from backend */}
         <div className="section">
-          <div className="row-label">Upcoming deadlines</div>
+          <div className="row-label" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span>Upcoming deadlines</span>
+            <span
+              onClick={fetchDeadlines}
+              style={{ cursor: "pointer", fontSize: "10px", color: "#1a73e8", textTransform: "none", letterSpacing: 0 }}
+            >
+              ↻ Refresh
+            </span>
+          </div>
+
           <div className="dl-list">
-            {deadlines.map((d) => (
-              <div className="dl-item" key={d.id}>
-                <div className="dl-color" style={{ background: d.color }} />
-                <div className="dl-meta">
-                  <div className="dl-name">{d.name}</div>
-                  <div className="dl-course">{d.course}</div>
-                </div>
-                <div className="dl-right">
-                  <span className="dl-date">{d.date}</span>
-                  {isActive ? (
-                    <span className="dl-sync">synced</span>
-                  ) : (
-                    <span className="dl-urgent">{d.days}</span>
-                  )}
-                </div>
+            {loadingDeadlines ? (
+              <div style={{ fontSize: "12px", color: "#9ca3af", padding: "10px 0", textAlign: "center" }}>
+                Loading...
               </div>
-            ))}
+            ) : deadlines.length === 0 ? (
+              <div style={{ fontSize: "12px", color: "#9ca3af", padding: "10px 0", textAlign: "center" }}>
+                No upcoming deadlines found.{"\n"}
+                {!isOn && <span>Turn on sync to load deadlines.</span>}
+              </div>
+            ) : (
+              deadlines.map((d, i) => {
+                const { dateStr, urgency, isUrgent } = formatDueDate(d.due_date);
+                return (
+                  <div className="dl-item" key={d.id}>
+                    <div className="dl-color" style={{ background: COLORS[i % COLORS.length] }} />
+                    <div className="dl-meta">
+                      <div className="dl-name">{d.title}</div>
+                    </div>
+                    <div className="dl-right">
+                      <span className="dl-date">{dateStr}</span>
+                      {isActive
+                        ? <span className="dl-sync">synced</span>
+                        : <span className={isUrgent ? "dl-urgent" : "dl-date"}>{urgency}</span>
+                      }
+                    </div>
+                  </div>
+                );
+              })
+            )}
           </div>
         </div>
 

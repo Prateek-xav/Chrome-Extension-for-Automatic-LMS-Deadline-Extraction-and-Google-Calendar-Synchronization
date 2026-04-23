@@ -3,8 +3,28 @@
   "name": "LMS Deadline Sync",
   "version": "1.0",
   "description": "Sync LMS deadlines",
+
   "action": {
     "default_popup": "index.html"
   },
-  "permissions": ["storage", "activeTab"]
+
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+
+  "host_permissions": [
+    "https://lms.bennett.edu.in/*",
+    "http://localhost:8000/*"
+  ],
+
+  "content_scripts": [
+    {
+      "matches": ["https://lms.bennett.edu.in/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ]
 }
